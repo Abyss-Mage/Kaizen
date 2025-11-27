@@ -1,6 +1,13 @@
-require('dotenv').config({ path: '../.env' }); 
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
+
+// --- CONFIGURATION ---
+const BATCH_SIZE = 100; 
+const REQUEST_INTERVAL_MS = 200; 
+const MAX_RETRIES = 3;
 
 // 1. Verify Environment Variables
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -8,27 +15,19 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
     console.error('❌ Error: Missing Supabase credentials.');
-    console.error('   Ensure SUPABASE_SERVICE_ROLE_KEY is set in .env.local');
     process.exit(1);
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- HELPER FUNCTIONS ---
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Normalizes the SOURCE Status (Publisher/Author status)
-// We WANT to know if the author is on Hiatus, so we pass it through.
 function normalizeSourceStatus(status) {
-    const statusMap = {
-        'ongoing': 'ongoing',
-        'completed': 'completed',
-        'hiatus': 'hiatus',      
-        'cancelled': 'cancelled' 
-    };
-    return statusMap[status] || 'ongoing'; // Default fallback
+    const statusMap = { 'ongoing': 'ongoing', 'completed': 'completed', 'hiatus': 'hiatus', 'cancelled': 'cancelled' };
+    return statusMap[status] || 'ongoing'; 
 }
 
-// Safely parses chapter numbers (handles "10.5", "null", etc.)
 function parseChapterCount(lastChapter) {
     if (!lastChapter) return 0;
     const parsed = parseFloat(lastChapter);
@@ -36,84 +35,94 @@ function parseChapterCount(lastChapter) {
 }
 
 async function seedManga() {
-    let offset = 0;
-    const LIMIT = 100;
-    const BATCHES = 5; 
+    console.log(`🌱 Starting Kaizen "Time-Walk" Ingestion...`);
+    
+    let lastCreatedAt = null; 
+    let totalProcessed = 0;
+    let hasMore = true;
 
-    console.log(`🌱 Starting Kaizen Seed Process... Target: ${BATCHES * LIMIT} Titles`);
-
-    for(let i=0; i < BATCHES; i++) {
-        console.log(`\n📦 Fetching Batch ${i+1}/${BATCHES} (Offset: ${offset})...`);
-        
+    while (hasMore) {
         try {
-            const response = await axios.get(`https://api.mangadex.org/manga`, {
-                params: {
-                    limit: LIMIT,
-                    offset: offset,
-                    'includes[]': 'cover_art',
-                    'contentRating[]': ['safe', 'suggestive'],
-                    'order[followedCount]': 'desc' 
-                }
-            });
+            const params = {
+                limit: BATCH_SIZE,
+                includes: ['cover_art'],
+                contentRating: ['safe', 'suggestive', 'erotica'], 
+                originalLanguage: ['ja', 'ko', 'zh', 'zh-hk'],
+                'order[createdAt]': 'asc' 
+            };
 
-            const mangaList = response.data.data.map(m => {
+            if (lastCreatedAt) {
+                // 🚨 ARCHITECT FIX: Sanitize Date Format
+                // API requires "YYYY-MM-DDTHH:mm:ss", removing "+00:00"
+                params['createdAtSince'] = lastCreatedAt.substring(0, 19);
+            }
+
+            console.log(`\n📦 Fetching Batch... (Cursor: ${params['createdAtSince'] || 'START'})`);
+
+            const response = await axios.get(`https://api.mangadex.org/manga`, { params });
+            const rawData = response.data.data;
+
+            if (!rawData || rawData.length === 0) {
+                console.log('✅ No more data found. Ingestion Complete.');
+                hasMore = false;
+                break;
+            }
+
+            const mangaList = rawData.map(m => {
                 const coverRel = m.relationships.find(r => r.type === 'cover_art');
-                const fileName = coverRel ? coverRel.attributes?.fileName : null;
-                const coverUrl = fileName 
-                    ? `https://uploads.mangadex.org/covers/${m.id}/${fileName}.256.jpg` 
+                const coverUrl = coverRel?.attributes?.fileName 
+                    ? `https://uploads.mangadex.org/covers/${m.id}/${coverRel.attributes.fileName}.256.jpg` 
                     : null;
 
-                // Safely handle missing titles
                 let title = "Unknown Title";
                 if (m.attributes.title) {
-                    title = m.attributes.title.en || Object.values(m.attributes.title)[0] || "Unknown";
+                    title = m.attributes.title.en || m.attributes.title['ja-ro'] || Object.values(m.attributes.title)[0];
                 }
 
                 return {
                     mangadex_id: m.id,
-                    title: title,
-                    description: m.attributes.description ? (m.attributes.description.en || "") : "",
-                    
-                    // ✅ FIXED: Separated Status Logic
-                    // 1. Source Status: The truth about the author/publisher
+                    title: title?.substring(0, 255) || "Unknown",
+                    description: (m.attributes.description?.en || "").substring(0, 5000),
                     status_raw: normalizeSourceStatus(m.attributes.status), 
-                    
-                    // 2. Scan Status: Defaults to 'ongoing' because we haven't checked the translations yet.
-                    // This prevents the "check constraint" crash you were seeing.
                     status_scan: 'ongoing', 
-
                     raw_source_url: m.attributes.links?.raw || null,
                     cover_url: coverUrl,
-                    
-                    // Initialize Counts
-                    total_chapters_scan: 0, 
-                    total_chapters_raw: parseChapterCount(m.attributes.lastChapter)
+                    total_chapters_raw: parseChapterCount(m.attributes.lastChapter),
+                    updated_at: m.attributes.updatedAt || new Date().toISOString() 
                 };
             });
 
-            const { error } = await supabase
-                .from('series')
-                .upsert(mangaList, { onConflict: 'mangadex_id' });
+            const { error } = await supabase.from('series').upsert(mangaList, { onConflict: 'mangadex_id' });
             
-            if (error) {
-                console.error('❌ Supabase Error:', error.message);
-                console.error('   Hint: Check your "series" table constraints for status_raw columns.');
-                // Print the first failing item to help debug
-                // console.log('Failed Item Sample:', mangaList[0]); 
-            } else {
-                console.log(`✅ Batch ${i+1} Inserted Successfully`);
+            if (error) console.error('❌ Upsert Error:', error.message);
+            else console.log(`✅ Upserted ${mangaList.length} titles.`);
+
+            totalProcessed += mangaList.length;
+
+            // Update Cursor
+            const lastItem = rawData[rawData.length - 1];
+            
+            // Prevent infinite loop on same second
+            if (lastItem.attributes.createdAt === lastCreatedAt && rawData.length < BATCH_SIZE) {
+                 hasMore = false; 
             }
+            lastCreatedAt = lastItem.attributes.createdAt;
+
+            await delay(REQUEST_INTERVAL_MS);
 
         } catch (err) {
-            console.error('❌ API or Network Error:', err.message);
+            console.error('❌ API Error:', err.message);
+            if (err.response?.data) {
+                console.error('   Data:', JSON.stringify(err.response.data));
+                // If we STILL get a 400, we must stop to debug
+                if (err.response.status === 400) break;
+            }
+            console.log('🔄 Retrying in 5s...');
+            await delay(5000);
         }
-        
-        offset += LIMIT;
-        // Rate Limit Guard (MangaDex allows 5 req/s)
-        await new Promise(r => setTimeout(r, 500));
     }
-
-    console.log('\n🎉 Seeding Complete!');
+    
+    console.log(`\n🎉 Final Count: ${totalProcessed} titles.`);
 }
 
 seedManga();
