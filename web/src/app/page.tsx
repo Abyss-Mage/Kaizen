@@ -1,6 +1,7 @@
 import { createClient } from '@/utils/supabase/server';
 import { MangaCard } from '@/components/manga/MangaCard';
 import { Search } from '@/components/Search';
+import Link from 'next/link';
 
 export default async function Home({
   searchParams,
@@ -46,20 +47,31 @@ export default async function Home({
   return (
     <main className="min-h-screen bg-black text-white p-6 md:p-12">
       <header className="mb-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
-        <div>
-          <h1 className="text-4xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
-            KAIZEN
-          </h1>
-          <p className="text-gray-400 mt-2 text-sm">
-            True-Status Manga Integrity.
-          </p>
-        </div>
-        
-        {/* Search Bar Integration */}
-        <div className="w-full md:w-1/3">
-          <Search />
-        </div>
-      </header>
+  <div className="flex-1">
+    <div className="flex items-center gap-4">
+      <h1 className="text-4xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
+        KAIZEN
+      </h1>
+      
+      {/* 🚨 NEW: Library Link */}
+      <Link 
+        href="/library"
+        className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 text-[10px] font-bold tracking-widest text-emerald-400 uppercase transition-all"
+      >
+        My Library
+      </Link>
+    </div>
+    
+    <p className="text-gray-400 mt-2 text-sm">
+      True-Status Manga Integrity.
+    </p>
+  </div>
+  
+  {/* Search Bar */}
+  <div className="w-full md:w-1/3">
+    <Search />
+  </div>
+</header>
 
       {/* Results Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
