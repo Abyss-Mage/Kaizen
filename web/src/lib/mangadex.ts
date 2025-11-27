@@ -33,6 +33,25 @@ export async function getChapterPages(chapterId: string): Promise<ChapterPages |
   }
 }
 
+export async function getChapterMetadata(chapterId: string) {
+  try {
+    const res = await fetch(`${MANGADEX_API}/chapter/${chapterId}`, { 
+      cache: 'force-cache' // Metadata rarely changes, safe to cache
+    });
+    const json = await res.json();
+    
+    // Find the parent Manga relationship
+    const mangaRel = json.data.relationships.find((r: any) => r.type === 'manga');
+    return {
+      mangaId: mangaRel?.id,
+      ...json.data.attributes
+    };
+  } catch (error) {
+    console.error('Failed to fetch chapter meta:', error);
+    return null;
+  }
+}
+
 export async function getMangaFeed(mangadexId: string) {
   try {
     // Determine the URL
