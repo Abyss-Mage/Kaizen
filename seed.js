@@ -1,28 +1,38 @@
-require('dotenv').config({ path: './.env' });
+require('dotenv').config({ path: './.env' }); 
 const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 
 // 1. Verify Environment Variables
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 
 if (!supabaseUrl || !supabaseKey) {
-    console.error('❌ Error: Missing Supabase credentials in .env.local');
+    console.error('❌ Error: Missing Supabase credentials.');
+    console.error('   Ensure SUPABASE_SERVICE_ROLE_KEY is set in .env.local');
     process.exit(1);
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// --- NEW HELPER FUNCTION ---
-// Maps MangaDex statuses to your Database's strict allowed values
-function normalizeStatus(status) {
+// --- HELPER FUNCTIONS ---
+
+// Normalizes the SOURCE Status (Publisher/Author status)
+// We WANT to know if the author is on Hiatus, so we pass it through.
+function normalizeSourceStatus(status) {
     const statusMap = {
         'ongoing': 'ongoing',
         'completed': 'completed',
-        'hiatus': 'ongoing',    // Treat hiatus as ongoing
-        'cancelled': 'dropped'  // Treat cancelled as dropped
+        'hiatus': 'hiatus',      
+        'cancelled': 'cancelled' 
     };
     return statusMap[status] || 'ongoing'; // Default fallback
+}
+
+// Safely parses chapter numbers (handles "10.5", "null", etc.)
+function parseChapterCount(lastChapter) {
+    if (!lastChapter) return 0;
+    const parsed = parseFloat(lastChapter);
+    return isNaN(parsed) ? 0 : parsed;
 }
 
 async function seedManga() {
@@ -30,7 +40,7 @@ async function seedManga() {
     const LIMIT = 100;
     const BATCHES = 5; 
 
-    console.log(`🌱 Starting Seed Process... Target: ${BATCHES * LIMIT} Titles`);
+    console.log(`🌱 Starting Kaizen Seed Process... Target: ${BATCHES * LIMIT} Titles`);
 
     for(let i=0; i < BATCHES; i++) {
         console.log(`\n📦 Fetching Batch ${i+1}/${BATCHES} (Offset: ${offset})...`);
@@ -63,12 +73,21 @@ async function seedManga() {
                     mangadex_id: m.id,
                     title: title,
                     description: m.attributes.description ? (m.attributes.description.en || "") : "",
-                    // USE THE HELPER FUNCTION HERE
-                    status_scan: normalizeStatus(m.attributes.status), 
+                    
+                    // ✅ FIXED: Separated Status Logic
+                    // 1. Source Status: The truth about the author/publisher
+                    status_raw: normalizeSourceStatus(m.attributes.status), 
+                    
+                    // 2. Scan Status: Defaults to 'ongoing' because we haven't checked the translations yet.
+                    // This prevents the "check constraint" crash you were seeing.
+                    status_scan: 'ongoing', 
+
                     raw_source_url: m.attributes.links?.raw || null,
                     cover_url: coverUrl,
+                    
+                    // Initialize Counts
                     total_chapters_scan: 0, 
-                    total_chapters_raw: 0 
+                    total_chapters_raw: parseChapterCount(m.attributes.lastChapter)
                 };
             });
 
@@ -78,17 +97,19 @@ async function seedManga() {
             
             if (error) {
                 console.error('❌ Supabase Error:', error.message);
+                console.error('   Hint: Check your "series" table constraints for status_raw columns.');
                 // Print the first failing item to help debug
-                console.log('Failed Item Sample:', mangaList[0]);
+                // console.log('Failed Item Sample:', mangaList[0]); 
             } else {
                 console.log(`✅ Batch ${i+1} Inserted Successfully`);
             }
 
         } catch (err) {
-            console.error('❌ API Error:', err.message);
+            console.error('❌ API or Network Error:', err.message);
         }
         
         offset += LIMIT;
+        // Rate Limit Guard (MangaDex allows 5 req/s)
         await new Promise(r => setTimeout(r, 500));
     }
 
