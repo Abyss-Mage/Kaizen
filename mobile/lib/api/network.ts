@@ -1,12 +1,5 @@
 import { Platform } from 'react-native';
 
-/**
- * 🛡️ KAIZEN ARCHITECT: TROJAN HORSE NETWORK LAYER
- * * This interface decouples the API logic from the actual HTTP transport.
- * Currently uses standard fetch. 
- * Later, this will inject a 'ScrapingBridge' to bypass Cloudflare.
- */
-
 interface RequestConfig {
   headers?: Record<string, string>;
   params?: Record<string, string | number>;
@@ -17,14 +10,10 @@ class NetworkClient {
   private baseURL: string = 'https://api.mangadex.org';
   
   private defaultHeaders = {
-    'User-Agent': `Kaizen/1.0 (${Platform.OS})`, // Good practice to identify
+    'User-Agent': `Kaizen/1.0 (${Platform.OS})`,
     'Content-Type': 'application/json',
   };
 
-  /**
-   * Helper to serialize params manually if needed, 
-   * though URLSearchParams is available in RN.
-   */
   private buildUrl(endpoint: string, params?: Record<string, string | number>) {
     const url = new URL(`${this.baseURL}${endpoint}`);
     if (params) {
@@ -36,15 +25,22 @@ class NetworkClient {
   }
 
   async get<T>(endpoint: string, config: RequestConfig = {}): Promise<T | null> {
+    const controller = new AbortController();
+    // 🛠️ FIX: Manual timeout implementation for Hermes compatibility
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, config.timeout || 10000);
+
     try {
       const url = this.buildUrl(endpoint, config.params);
       
-      // 🚨 INTERCEPTOR POINT: In Phase 2, we check if target is protected here.
       const response = await fetch(url, {
         method: 'GET',
         headers: { ...this.defaultHeaders, ...config.headers },
-        signal: AbortSignal.timeout(config.timeout || 10000), // 10s timeout for mobile
+        signal: controller.signal, 
       });
+
+      clearTimeout(timeoutId); // Clear timer on success
 
       if (!response.ok) {
         console.warn(`[Network] ${response.status} on ${endpoint}`);
@@ -52,8 +48,14 @@ class NetworkClient {
       }
 
       return await response.json();
-    } catch (error) {
-      console.error(`[Network] Failed: ${endpoint}`, error);
+    } catch (error: any) { // Type as any to safely check .name
+      clearTimeout(timeoutId);
+      
+      if (error.name === 'AbortError') {
+        console.error(`[Network] Timeout: ${endpoint}`);
+      } else {
+        console.error(`[Network] Failed: ${endpoint}`, error);
+      }
       return null;
     }
   }
