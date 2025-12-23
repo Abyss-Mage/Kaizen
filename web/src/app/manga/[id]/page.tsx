@@ -1,4 +1,4 @@
-import { createClient } from '@/utils/supabase/server';
+import { createAdminClient, APPWRITE_CONFIG } from '@/lib/appwrite'; // 1. Import Appwrite
 import { getMangaFeed } from '@/lib/mangadex';
 import Image from 'next/image';
 import { notFound } from 'next/navigation';
@@ -18,24 +18,28 @@ const getStatusColor = (status: string) => {
 
 export default async function MangaDetails({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const supabase = await createClient();
+  const { databases } = await createAdminClient(); // 2. Init Appwrite
 
-  // 1. Fetch Metadata from DB FIRST to get the correct MangaDex ID
-  // We need 'mangadex_id' to query the external API, but the URL param 'id' is our internal Supabase UUID.
-  const { data: manga, error } = await supabase
-    .from('series')
-    .select('*')
-    .eq('id', id)
-    .single();
+  let manga;
+  try {
+    // 3. Fetch Metadata from Appwrite DB
+    // Unlike Supabase .eq('id', id), Appwrite looks up directly by Document ID
+    manga = await databases.getDocument(
+      APPWRITE_CONFIG.DATABASE_ID,
+      APPWRITE_CONFIG.COLLECTION_ID_SERIES,
+      id
+    );
+  } catch (error) {
+    console.error("Manga not found:", error);
+    return notFound();
+  }
   
-  if (error || !manga) return notFound();
+  if (!manga) return notFound();
 
-  // 2. Fetch Chapters using the Real MangaDex ID
-  // This uses our native fetch utility (no axios)
+  // 4. Fetch Chapters using the Real MangaDex ID
   const chapters = await getMangaFeed(manga.mangadex_id);
 
-  // 3. The Gap Calculation
-  // Calculates how far behind the scanlation is from the raw release
+  // 5. The Gap Calculation
   const latestScan = chapters[0]?.chapter ? parseFloat(chapters[0].chapter) : 0;
   const rawTotal = manga.total_chapters_raw || 0;
   const gap = rawTotal > latestScan ? (rawTotal - latestScan) : 0;
@@ -125,7 +129,6 @@ export default async function MangaDetails({ params }: { params: Promise<{ id: s
                 <div>
                   <div className="flex items-baseline gap-2">
                     <span className="text-lg font-bold text-white">Ch. {ch.chapter}</span>
-                    {/* 🚨 INTERACTIVE: Read Status Badge */}
                     <ChapterStatus mangaId={manga.mangadex_id} chapterId={ch.id} />
                     {ch.title && <span className="text-sm text-gray-400 line-clamp-1">- {ch.title}</span>}
                   </div>
